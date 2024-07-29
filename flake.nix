@@ -14,24 +14,27 @@
     {
       devShells.default = pkgs.mkShell rec {
         nativeBuildInputs = with pkgs; [
-          sccache
-          lld
-          mold
+          (fenix.complete.withComponents [
+            "rustc"
+            "cargo"
+            "clippy"
+            "rustfmt"
+            "rust-analyzer"
+            "miri"
+            "rust-src"
+            "rustc-codegen-cranelift-preview"
+            "llvm-tools-preview"
+          ])
+          fenix.targets.x86_64-unknown-linux-gnu.latest.rust-std
 
           cargo-msrv
           cargo-wizard
           
-          fenix.complete.rustc
-          fenix.complete.cargo
-          fenix.complete.clippy
-          fenix.complete.rustfmt
-          fenix.complete.rust-analyzer
-          fenix.complete.miri
-          fenix.complete.rust-src
-          fenix.complete.rustc-codegen-cranelift-preview
-          fenix.complete.llvm-tools-preview
-          fenix.targets.x86_64-unknown-linux-gnu.latest.rust-std
+          sccache
+          lld
+          mold
 
+          fuse
           openssl.dev
           pkg-config
         ];

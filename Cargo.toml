@@ -1,4 +1,4 @@
-# cargo-features = ["codegen-backend"]
+cargo-features = ["codegen-backend"]
 [package]
 name = "tg"
 version = "0.1.0"
@@ -9,10 +9,15 @@ clap = { version = "4.5.11", features = ["derive"] }
 directories = "5.0.1"
 yakv = { path = "./yakv" }
 bitcode = "0.6.3"
+anyhow = { version = "1.0.86" }
+itertools = "0.13.0"
+fuser = "0.14.0"
+libc = "0.2.155"
+ctrlc = "3.4.4"
 
 [profile.dev]
 debug = 0
-# codegen-backend = "cranelift"
+codegen-backend = "cranelift"
 
 [profile.release]
 lto = true
