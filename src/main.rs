@@ -1,8 +1,6 @@
 use fuse::Fuse;
-use itertools::Itertools;
 use std::{os::unix::ffi::OsStringExt, sync::atomic::AtomicBool};
 use utils::Lazy;
-use yakv::storage::Select;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -33,7 +31,9 @@ struct Add {
     tags: Vec<String>,
 }
 
-static MOUNT_K: Lazy<Vec<u8>> = Lazy::new(|| b"__MOUNTPOINT__".to_vec());
+struct Config {
+    mountpoint: Option<std::path::PathBuf>,
+}
 
 fn main() -> Result<()> {
     let cli = <Cli as clap::Parser>::parse();
@@ -42,25 +42,32 @@ fn main() -> Result<()> {
         .ok_or(anyhow!("Unable to create the application's data directory"))?;
     let local = dirs.data_dir();
     std::fs::create_dir_all(local)?;
-    
-    let db = yakv::storage::Storage::open(
-        &local.join("db.yakv"),
-        yakv::storage::StorageConfig::default(),
-    ).context("Database")?;
 
-    let mountpoint = db.get(MOUNT_K.get())?;
+    let db = rusqlite::Connection::open(local.join("db.sqlite")).context("Database Creation")?;
+
+    db.execute_batch(include_str!("./sql/migrations.sql"))?;
+
+    let config = db
+        .query_row("select * from Config;", [], |r| {
+            let mountpoint = r
+                .get(1)
+                .ok()
+                .map(|m: String| std::ffi::OsString::from_vec(m.into_bytes()).into());
+            Ok(Config { mountpoint })
+        })
+        .context("Get Config")?;
 
     let Some(command) = cli.command else {
         // no subcommand specified, add entry
-        return add(cli.add, &db, mountpoint);
+        return add(cli.add, &db, config.mountpoint.as_deref());
     };
 
     match command {
         Commands::Mount { mountpoint } => {
-            mount(&mountpoint, db.iter())?;
-            db.put(
-                MOUNT_K.get().clone(),
-                mountpoint.into_os_string().into_encoded_bytes(),
+            mount(&mountpoint, &db)?;
+            db.execute(
+                "update Config set mountpoint = ?",
+                [mountpoint.display().to_string()],
             )?;
         }
     }
@@ -70,8 +77,8 @@ fn main() -> Result<()> {
 
 fn add(
     Add { file, tags }: Add,
-    db: &yakv::storage::Storage,
-    mountpoint: Option<Vec<u8>>,
+    db: &rusqlite::Connection,
+    mountpoint: Option<&std::path::Path>,
 ) -> Result<()> {
     let file = file
         .ok_or_else(|| anyhow!("Called \"add\" without \"file\" argument"))?
@@ -82,23 +89,38 @@ fn add(
         return Err(anyhow!("The file {file:?} does not exist"));
     }
 
-    db.put(
-        file.as_os_str().as_encoded_bytes().to_vec(),
-        bitcode::encode(&tags),
+    let separator = format!("\"),({file:?},\"");
+    db.execute(
+        &format!(
+            "insert into FileTags values ({file:?},\"{}\");",
+            tags.join(&separator)
+        ),
+        [],
     )?;
-
-    if let Some(mountpoint) = mountpoint {
-        let path: std::path::PathBuf = std::ffi::OsString::from_vec(mountpoint).into();
-        add_entry(&path, &file, tags)?;
-    }
+    // db.put(
+    //     file.as_os_str().as_encoded_bytes().to_vec(),
+    //     bitcode::encode(&tags),
+    // )?;
 
     Ok(())
 }
 
-fn mount(mountpoint: &std::path::Path, entries: yakv::storage::StorageIterator) -> Result<()> {
+fn mount(mountpoint: &std::path::Path, db: &rusqlite::Connection) -> Result<()> {
     if !mountpoint.try_exists()? {
         return Err(anyhow!("The directory {mountpoint:?} does not exist"));
     }
+
+    let mut files_stmt = db.prepare_cached("select distinct file from FileTags")?;
+    let rows = files_stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut tags_stmt = db.prepare_cached("select tag from FileTags where file = ?")?;
+    for file in rows.flatten() {
+        let tags = tags_stmt.query_map([&file], |r| r.get::<_, String>(0))?
+            .flatten()
+            .collect::<Vec<_>>();
+        println!("{file}: {tags:?}");
+    }
+
+    return Ok(());
 
     let running = std::sync::Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -111,7 +133,8 @@ fn mount(mountpoint: &std::path::Path, entries: yakv::storage::StorageIterator) 
         Fuse,
         mountpoint,
         &[fuser::MountOption::FSName("tg".to_owned())],
-    ).unwrap();
+    )
+    .unwrap();
     println!("Mounted successfully to {mountpoint:?}");
 
     while running.load(std::sync::atomic::Ordering::SeqCst) {}
@@ -126,23 +149,6 @@ fn mount(mountpoint: &std::path::Path, entries: yakv::storage::StorageIterator) 
     //     let tags: Vec<String> = bitcode::decode(&tags)?;
     //     add_entry(mountpoint, &file, tags)?;
     // }
-
-    Ok(())
-}
-
-fn add_entry(
-    mountpoint: &std::path::Path,
-    file: &std::path::Path,
-    mut tags: Vec<String>,
-) -> Result<()> {
-    debug_assert!(mountpoint.try_exists()?);
-    for t in &mut tags {
-        t.insert(0, '#')
-    }
-
-    for perm in tags.iter().permutations(tags.len()) {
-        println!("permutations: {perm:?}");
-    }
 
     Ok(())
 }

@@ -23,7 +23,7 @@ const ROOT_DIR_ATTR: fuser::FileAttr = fuser::FileAttr {
     blksize: 512,
 };
 
-const PASTA_DIR_ATTR: fuser::FileAttr = const { 
+const PASTA_DIR_ATTR: fuser::FileAttr = const {
     fuser::FileAttr {
         ino: 2,
         ..ROOT_DIR_ATTR
@@ -41,7 +41,13 @@ const LINK_ATTR: fuser::FileAttr = const {
 pub struct Fuse;
 
 impl Filesystem for Fuse {
-    fn lookup(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &std::ffi::OsStr, reply: fuser::ReplyEntry) {
+    fn lookup(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &std::ffi::OsStr,
+        reply: fuser::ReplyEntry,
+    ) {
         if parent == 1 && name.to_str() == Some("link") {
             reply.entry(&TTL, &LINK_ATTR, 0)
         } else {
@@ -53,7 +59,7 @@ impl Filesystem for Fuse {
             1 => reply.attr(&TTL, &ROOT_DIR_ATTR),
             2 => reply.attr(&TTL, &PASTA_DIR_ATTR),
             3 => reply.attr(&TTL, &LINK_ATTR),
-            _ => reply.error(ENOENT)
+            _ => reply.error(ENOENT),
         }
     }
     fn readlink(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyData) {
