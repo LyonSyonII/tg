@@ -1,47 +1,67 @@
-use fake::Fake;
-use rand::Rng;
+use clap::Parser;
 use utils::Exit as _;
 use yakv::storage::Select;
 
 mod utils;
+
+#[derive(clap::Parser, Debug, Clone)]
+#[command(version, about, args_conflicts_with_subcommands = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    #[clap(flatten)]
+    add: Add,
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+enum Commands {
+    /// Sets the mountpoint for the tag filesystem.
+    Mount {
+        mountpoint: String,
+    },
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct Add {
+    file: String,
+    #[clap(required = true)]
+    tags: Vec<String>,
+}
 
 fn main() {
     let dirs = directories::ProjectDirs::from("dev", "lyonsyonii", "fg")
         .exit("error: unable to create app directory");
     let local = dirs.data_dir();
     std::fs::create_dir_all(local).unwrap();
-    
+
     let db = yakv::storage::Storage::open(
         &local.join("db.yakv"),
         yakv::storage::StorageConfig::default(),
     )
     .unwrap();
-    
-    use rand::SeedableRng;
-    let mut rng = rand::prelude::StdRng::seed_from_u64(56);
-    let mut trans = db.start_transaction();
-    for i in 0..5_000_000usize {
-        let words = rng.gen_range(1..=4);
-        let key: String = fake::faker::name::en::Name().fake_with_rng(&mut rng);
-        let names: Vec<_> = fake::faker::lorem::en::Words(0..words).fake_with_rng(&mut rng);
-        trans.put(
-            &key.into_bytes(),
-            &names
-                .into_iter()
-                .map(|n| n.into_bytes())
-                .reduce(|mut acc, v| {
-                    acc.extend(v);
-                    acc
-                })
-                .unwrap_or_default(),
-        ).unwrap();
-        eprintln!("{i}");
-    }
-    trans.commit().unwrap();
 
-    // for entry in db.iter().flatten() {
-    //     println!("{entry:?}");
-    // }
-    // db.set("pasta", &vec!["hola"; 256]).unwrap();
-    // println!("{:?}", db.iter().map(|i| (i.get_key().to_owned(), i.get_value::<Vec<String>>())).collect::<Vec<_>>())
+    let cli = <Cli as clap::Parser>::parse();
+    dbg!(&cli);
+    let mountpoint = db
+        .get(&b"".to_vec())
+        .unwrap()
+        .map(|v| String::from_utf8(v).unwrap());
+    dbg!(mountpoint);
+    
+    if let Some(command) = cli.command {
+        match command {
+            Commands::Mount { mountpoint } => mount(mountpoint),
+        }
+    } else {
+        add(cli.add);
+    }
+}
+
+fn add(Add { file, tags }: Add) {
+    eprintln!("Adding {file:?} : {tags:?}");
+}
+
+fn mount(mountpoint: String) {
+
 }
