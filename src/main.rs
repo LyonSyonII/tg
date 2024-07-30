@@ -1,5 +1,8 @@
 use fuse::Fuse;
-use std::{os::unix::ffi::{OsStrExt, OsStringExt}, sync::atomic::AtomicBool};
+use std::{
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    sync::atomic::AtomicBool,
+};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -110,15 +113,16 @@ async fn mount_async(fs: fuse::Fuse, mountpoint: &std::path::Path) -> Result<()>
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
     let mut mount_options = fuse3::MountOptions::default();
-    mount_options.uid(uid).gid(gid);
+    mount_options.uid(uid).gid(gid).force_readdir_plus(true);
+    
     let mut mount_handle = fuse3::path::Session::new(mount_options)
         .mount_with_unprivileged(fs, mountpoint)
         .await
         .unwrap();
     eprintln!("Mounted successfully to {mountpoint:?}");
-    
+
     let handle = &mut mount_handle;
-    
+
     tokio::select! {
         res = handle => {
             println!("[tg::unmounted] Unmounted manually");

@@ -42,7 +42,7 @@ fn insert(db: &mut Connection) -> Result<()> {
 
 fn select(db: &Connection) -> Result<()> {
     let tags = ["voluptatem", "eius", "est", "dolores", "harum", "et", "ex"];
-    let list = list_to_sql(tags);
+    let (_, list) = list_to_sql(tags);
     let stmt = format!(
         r#"
         select tag from FileTags where file in (

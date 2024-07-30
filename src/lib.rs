@@ -14,17 +14,20 @@ pub fn list_to_values(key: impl std::fmt::Debug, list: impl AsRef<[String]>) -> 
     acc
 }
 
-pub fn list_to_sql<S: AsRef<str>>(list: impl AsRef<[S]>) -> String {
-    let list = list.as_ref();
-
-    let mut acc = String::from("(\"");
-    if let Some(f) = list.first() {
-        acc += f.as_ref();
+pub fn list_to_sql<S: std::fmt::Debug>(list: impl IntoIterator<Item = S>) -> (usize, String) {
+    let mut list = list.into_iter();
+    
+    let mut len = 0;
+    let mut acc = String::from("(");
+    if let Some(f) = list.next() {
+        acc = format!("{acc}{f:?}");
+        len += 1;
     }
-    for s in list.get(1..).unwrap_or_default() {
-        acc = acc + "\",\"" + s.as_ref();
+    for s in list {
+        acc = format!("{acc},{s:?}");
+        len += 1;
     }
-    acc += "\")";
+    acc += ")";
 
-    acc
+    (len, acc)
 }
