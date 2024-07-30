@@ -18,8 +18,8 @@ const ROOT_DIR_ATTR: fuser::FileAttr = fuser::FileAttr {
     kind: fuser::FileType::Directory,
     perm: 0o755,
     nlink: 2,
-    uid: 501,
-    gid: 20,
+    uid: 1000,
+    gid: 100,
     rdev: 0,
     flags: 0,
     blksize: 512,
@@ -62,6 +62,8 @@ impl Filesystem for Fuse {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEntry,
     ) {
+        eprintln!("[lookup] name = {name:?}");
+        return;
         if parent == 1 && name.to_str() == Some("link") {
             reply.entry(&TTL, &LINK_ATTR, 0)
         } else {
@@ -69,14 +71,17 @@ impl Filesystem for Fuse {
         }
     }
     fn getattr(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
+        eprintln!("[getattr] ino = {ino}");
         match ino {
             1 => reply.attr(&TTL, &ROOT_DIR_ATTR),
-            2 => reply.attr(&TTL, &PASTA_DIR_ATTR),
-            3 => reply.attr(&TTL, &LINK_ATTR),
+            // 2 => reply.attr(&TTL, &PASTA_DIR_ATTR),
+            // 3 => reply.attr(&TTL, &LINK_ATTR),
             _ => reply.error(ENOENT),
         }
     }
     fn readlink(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyData) {
+        eprintln!("[readlink] ino = {ino}");
+        return;
         if ino == 3 {
             reply.data(b"../target");
         } else {
@@ -91,20 +96,30 @@ impl Filesystem for Fuse {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        if ino != 1 {
-            return reply.error(ENOENT);
-        }
+        eprintln!("[readdir] ino = {ino}, fh = {fh}, offset = {offset}");
 
-        let entries = [
-            (1, fuser::FileType::Directory, "."),
+        let entries = if ino == 1 {
+            &[
+                (1u64, fuser::FileType::Directory, "."),
+                (1, fuser::FileType::Directory, ".."),
+            ]
+        } else {
+            &[
+                (1, fuser::FileType::Directory, ".."),
+                (2, fuser::FileType::Directory, "."),
+            ]
+        };
+
+/*         let entries = [
             (1, fuser::FileType::Directory, ".."),
-            (2, fuser::FileType::Directory, "pasta"),
-            (3, fuser::FileType::Symlink, "link"),
-        ];
-
-        for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
+            (2, fuser::FileType::Directory, "."),
+            (3, fuser::FileType::Directory, "pasta"),
+            (4, fuser::FileType::Symlink, "link"),
+        ]; */
+        
+        for (i, (ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
             // i + 1 means the index of the next entry
-            if reply.add(entry.0, (i + 1) as i64, entry.1, entry.2) {
+            if reply.add(*ino, (i + 1) as i64, *kind, name) {
                 break;
             }
         }

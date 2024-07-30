@@ -137,13 +137,13 @@ fn mount(mountpoint: &std::path::Path, db_path: impl AsRef<std::path::Path>) -> 
                     continue;
                 }
                 None => {
-                    eprintln!("[Unmounted] Process killed via signal");
+                    eprintln!("[tg::unmounted] Process killed via signal");
                     return
                 },
             }
         }
         
-        eprintln!("[Unmounted] Unmounted manually");
+        eprintln!("[tg::unmounted] Unmounted manually");
         let (lock, cvar) = &*pair3;
         let mut started = lock.lock().unwrap();
         *started = true;
