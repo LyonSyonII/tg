@@ -1,7 +1,9 @@
 use std::time::UNIX_EPOCH;
 
+use anyhow::Result;
 use fuser::Filesystem;
 use libc::ENOENT;
+use rusqlite::Connection;
 
 const TTL: std::time::Duration = std::time::Duration::from_secs(1); // 1 second
 
@@ -38,7 +40,19 @@ const LINK_ATTR: fuser::FileAttr = const {
     }
 };
 
-pub struct Fuse;
+pub struct Fuse {
+    tags: Vec<String>,
+    db: rusqlite::Connection,
+}
+
+impl Fuse {
+    pub fn new(db_path: impl AsRef<std::path::Path>) -> Result<Self> {
+        Ok(Fuse {
+            tags: Vec::new(),
+            db: rusqlite::Connection::open(db_path)?,
+        })
+    }
+}
 
 impl Filesystem for Fuse {
     fn lookup(

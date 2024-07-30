@@ -1,6 +1,3 @@
-
-
-
 pub struct Lazy<T> {
     value: std::cell::UnsafeCell<Option<T>>,
     f: fn() -> T,
@@ -13,7 +10,7 @@ impl<T> Lazy<T> {
             f,
         }
     }
-    
+
     pub fn get(&self) -> &T {
         let value = unsafe { &mut *self.value.get() };
         if value.is_none() {

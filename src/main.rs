@@ -1,6 +1,5 @@
 use fuse::Fuse;
 use std::{os::unix::ffi::OsStringExt, sync::atomic::AtomicBool};
-use utils::Lazy;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -42,8 +41,9 @@ fn main() -> Result<()> {
         .ok_or(anyhow!("Unable to create the application's data directory"))?;
     let local = dirs.data_dir();
     std::fs::create_dir_all(local)?;
+    let db_path = local.join("db.sqlite");
 
-    let db = rusqlite::Connection::open(local.join("db.sqlite")).context("Database Creation")?;
+    let db = rusqlite::Connection::open(&db_path).context("Database Creation")?;
 
     db.execute_batch(include_str!("./sql/migrations.sql"))?;
 
@@ -59,12 +59,12 @@ fn main() -> Result<()> {
 
     let Some(command) = cli.command else {
         // no subcommand specified, add entry
-        return add(cli.add, &db, config.mountpoint.as_deref());
+        return add(cli.add, &db);
     };
 
     match command {
         Commands::Mount { mountpoint } => {
-            mount(&mountpoint, &db)?;
+            mount(&mountpoint, db_path)?;
             db.execute(
                 "update Config set mountpoint = ?",
                 [mountpoint.display().to_string()],
@@ -75,11 +75,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn add(
-    Add { file, tags }: Add,
-    db: &rusqlite::Connection,
-    mountpoint: Option<&std::path::Path>,
-) -> Result<()> {
+fn add(Add { file, tags }: Add, db: &rusqlite::Connection) -> Result<()> {
     let file = file
         .ok_or_else(|| anyhow!("Called \"add\" without \"file\" argument"))?
         .canonicalize()?;
@@ -88,68 +84,83 @@ fn add(
     if !file.try_exists()? {
         return Err(anyhow!("The file {file:?} does not exist"));
     }
-    
-    let separator = format!("\"),({file:?},\"");
-    db.execute(
-        &format!(
-            "insert into FileTags values ({file:?},\"{}\");",
-            tags.join(&separator)
-        ),
-        [],
-    )?;
-    // db.put(
-    //     file.as_os_str().as_encoded_bytes().to_vec(),
-    //     bitcode::encode(&tags),
-    // )?;
+
+    let values = tg::list_to_values(file, tags);
+    db.execute(&format!("insert into FileTags values {values};"), [])?;
 
     Ok(())
 }
 
-fn mount(mountpoint: &std::path::Path, db: &rusqlite::Connection) -> Result<()> {
+/// Mounts the virtual filesystem.
+///
+/// Blocks until unmounted or interrupted.
+fn mount(mountpoint: &std::path::Path, db_path: impl AsRef<std::path::Path>) -> Result<()> {
+    use std::sync::*;
+
     if !mountpoint.try_exists()? {
         return Err(anyhow!("The directory {mountpoint:?} does not exist"));
     }
 
-    let mut files_stmt = db.prepare_cached("select distinct file from FileTags")?;
-    let rows = files_stmt.query_map([], |r| r.get::<_, String>(0))?;
-    let mut tags_stmt = db.prepare_cached("select tag from FileTags where file = ?")?;
-    for file in rows.flatten() {
-        let tags = tags_stmt
-            .query_map([&file], |r| r.get::<_, String>(0))?
-            .flatten()
-            .collect::<Vec<_>>();
-        println!("{file}: {tags:?}");
-    }
-
-    return Ok(());
-
-    let running = std::sync::Arc::new(AtomicBool::new(true));
-    let r = running.clone();
+    let pair = Arc::new((Mutex::new(false), Condvar::new()));
+    let pair2 = Arc::clone(&pair);
+    let pair3 = Arc::clone(&pair);
     ctrlc::set_handler(move || {
-        r.store(false, std::sync::atomic::Ordering::SeqCst);
+        let (lock, cvar) = &*pair2;
+        let mut started = lock.lock().unwrap();
+        *started = true;
+        // We notify the condvar that the value has changed.
+        cvar.notify_one();
     })
     .unwrap();
 
     let handle = fuser::spawn_mount2(
-        Fuse,
+        Fuse::new(db_path)?,
         mountpoint,
         &[fuser::MountOption::FSName("tg".to_owned())],
     )
     .unwrap();
-    println!("Mounted successfully to {mountpoint:?}");
+    eprintln!("Mounted successfully to {mountpoint:?}");
 
-    while running.load(std::sync::atomic::Ordering::SeqCst) {}
+    let handle = std::sync::Arc::new(std::sync::Mutex::new(Some(handle)));
+    let handle2 = handle.clone();
+    std::thread::spawn(move || {
+        loop {
+            let finished = handle2
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|h| h.guard.is_finished());
+            match finished {
+                Some(true) => break,
+                Some(false) => {
+                    std::thread::yield_now();
+                    continue;
+                }
+                None => {
+                    eprintln!("[Unmounted] Process killed via signal");
+                    return
+                },
+            }
+        }
+        
+        eprintln!("[Unmounted] Unmounted manually");
+        let (lock, cvar) = &*pair3;
+        let mut started = lock.lock().unwrap();
+        *started = true;
+        // We notify the condvar that the value has changed.
+        cvar.notify_one();
+    });
 
-    drop(handle);
+    // Wait for the threads to end.
+    let (lock, cvar) = &*pair;
+    let mut started = lock.lock().unwrap();
+    while !*started {
+        started = cvar.wait(started).unwrap();
+    }
 
-    // for (file, tags) in entries.flatten() {
-    //     let file: std::path::PathBuf = std::ffi::OsString::from_vec(file).into();
-    //     if !file.has_root() {
-    //         continue;
-    //     }
-    //     let tags: Vec<String> = bitcode::decode(&tags)?;
-    //     add_entry(mountpoint, &file, tags)?;
-    // }
+    if let Some(handle) = handle.lock().unwrap().take() {
+        handle.join();
+    }
 
     Ok(())
 }
