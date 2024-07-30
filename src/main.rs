@@ -40,7 +40,7 @@ struct Config {
 fn main() -> Result<()> {
     let cli = <Cli as clap::Parser>::parse();
 
-    let dirs = directories::ProjectDirs::from("dev", "lyonsyonii", "fg")
+    let dirs = directories::ProjectDirs::from("dev", "lyonsyonii", "tg")
         .ok_or(anyhow!("Unable to create the application's data directory"))?;
     let local = dirs.data_dir();
     std::fs::create_dir_all(local)?;

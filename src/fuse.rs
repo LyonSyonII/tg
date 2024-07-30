@@ -40,12 +40,14 @@ const LINK_ATTR: fuse3::FileAttr = fuse3::FileAttr {
 
 pub struct Fuse {
     db_path: std::path::PathBuf,
+    request_cache: tokio::sync::RwLock<std::collections::HashMap<u32, Vec<std::ffi::OsString>>>
 }
 
 impl Fuse {
     pub fn new(db_path: impl Into<std::path::PathBuf>) -> Self {
         Fuse {
             db_path: db_path.into(),
+            request_cache: tokio::sync::RwLock::new(std::collections::HashMap::new())
         }
     }
 
@@ -54,9 +56,11 @@ impl Fuse {
     }
 }
 
+type DynIter<T> = Box<dyn Iterator<Item = T> + Send>;
+
 impl fuse3::PathFilesystem for Fuse {
-    type DirEntryPlusStream<'a> = futures_util::stream::Iter<std::vec::IntoIter<::fuse3::Result<fuse3::DirectoryEntryPlus>>> where Self: 'a;
-    type DirEntryStream<'a> = futures_util::stream::Iter<std::vec::IntoIter<::fuse3::Result<fuse3::DirectoryEntry>>> where Self: 'a;
+    type DirEntryPlusStream<'a> = futures_util::stream::Iter<DynIter<::fuse3::Result<fuse3::DirectoryEntryPlus>>> where Self: 'a;
+    type DirEntryStream<'a> = futures_util::stream::Iter<DynIter<::fuse3::Result<fuse3::DirectoryEntry>>> where Self: 'a;
 
     async fn init(&self, _req: fuse3::Request) -> ::fuse3::Result<fuse3::ReplyInit> {
         Ok(fuse3::ReplyInit {
@@ -76,7 +80,7 @@ impl fuse3::PathFilesystem for Fuse {
     ) -> ::fuse3::Result<fuse3::ReplyEntry> {
         let parent = std::path::Path::new(parent);
         let name = std::path::Path::new(name);
-        eprintln!("[lookup]  parent = {parent:?}, name = {name:?}");
+        // eprintln!("[lookup]  parent = {parent:?}, name = {name:?}");
 
         Ok(fuse3::ReplyEntry {
             ttl: TTL,
@@ -100,42 +104,6 @@ impl fuse3::PathFilesystem for Fuse {
         })
     }
 
-    async fn readdir<'a>(
-        &'a self,
-        req: fuse3::Request,
-        path: &'a OsStr,
-        fh: u64,
-        offset: i64,
-    ) -> ::fuse3::Result<fuse3::ReplyDirectory<Self::DirEntryStream<'a>>> {
-        let path = std::path::Path::new(path);
-        let tags = path
-            .components()
-            .skip(1)
-            .map(|c| c.as_os_str())
-            .collect::<Vec<_>>();
-        eprintln!("[readdir] tags = {tags:?}, offset = {offset}");
-        
-        let entries = vec![
-            (fuse3::FileType::Directory, std::ffi::OsString::from(".")),
-            (fuse3::FileType::Directory, std::ffi::OsString::from("..")),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(i, (kind, name))| {
-            fuse3::DirectoryEntry {
-                kind,
-                name,
-                offset: i as i64 + 1,
-            }
-        })
-        .skip(offset as usize)
-        .map(::fuse3::Result::Ok)
-        .collect::<Vec<_>>();
-        Ok(fuse3::ReplyDirectory {
-            entries: futures_util::stream::iter(entries),
-        })
-    }
-
     async fn readdirplus<'a>(
         &'a self,
         req: fuse3::Request,
@@ -145,34 +113,54 @@ impl fuse3::PathFilesystem for Fuse {
         lock_owner: u64,
     ) -> ::fuse3::Result<fuse3::ReplyDirectoryPlus<Self::DirEntryPlusStream<'a>>> {
         eprintln!("[readdirplus] path = {parent:?}, offset = {offset}");
+        // dbg!(&req);
 
-        let db = rusqlite::Connection::open(&self.db_path).unwrap();
-        
         let path = std::path::Path::new(parent);
         let tags = path
             .components()
             .skip(1)
             .map(|c| c.as_os_str());
-        let files = { 
-            let (len, list) = tg::list_to_sql(tags);
-            let stmt = format!(
-                r#"
-                select file from FileTags
-                where tag in {list}
-                group by file 
-                having count(*) = {}"#,
-                len
-            );
-            let mut stmt = db.prepare(&stmt).unwrap();
-            stmt.query_map([], |r| {
-                Ok((fuse3::FileType::Symlink, std::ffi::OsString::from(r.get::<_, String>(0)?), LINK_ATTR))
-            })
-            .unwrap()
-            .flatten()
-            .collect::<Vec<_>>()
-        };
         
-        let entries = vec![
+        // let instant = std::time::Instant::now();
+        
+        let files = {
+            let cache = self.request_cache.read().await.get(&req.pid).cloned();
+            if let Some(c) = cache {
+                c.get(offset as usize..).unwrap_or_default().to_vec()
+            } else {
+                let files = {
+                    let db = rusqlite::Connection::open(&self.db_path).unwrap();
+                    let (len, list) = tg::list_to_sql(tags);
+                    let stmt = format!(
+                        r#"
+                        select file from FileTags
+                        where tag in {list}
+                        group by file 
+                        having count(*) = {}
+                        -- limit 100 offset {}
+                        "#,
+                        len,
+                        offset
+                    );
+                    let mut stmt = db.prepare_cached(&stmt).unwrap();
+                    stmt.query_map([], |r| {
+                        let path = std::path::PathBuf::from(std::ffi::OsString::from(r.get::<_, String>(0)?));
+                        Ok(path.file_name().unwrap().to_owned())
+                    })
+                    .unwrap()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                };
+
+                self.request_cache.write().await.insert(req.pid, files.clone());
+                files
+            }
+        }
+        .into_iter()
+        .map(|n| (fuse3::FileType::Symlink, n, LINK_ATTR));
+        // eprintln!("Finished query and collect in {:?}\n", instant.elapsed());
+        
+        let entries = [
             (fuse3::FileType::Directory, std::ffi::OsString::from("."), ROOT_DIR_ATTR),
             (fuse3::FileType::Directory, std::ffi::OsString::from(".."), ROOT_DIR_ATTR),
         ]
@@ -190,8 +178,9 @@ impl fuse3::PathFilesystem for Fuse {
             }
         })
         .skip(offset as usize)
-        .map(::fuse3::Result::Ok)
-        .collect::<Vec<_>>();
+        .map(::fuse3::Result::Ok);
+        
+        let entries: Box<dyn Iterator<Item = std::result::Result<fuse3::DirectoryEntryPlus, ::fuse3::Errno>> + Send> = Box::new(entries);
         Ok(fuse3::ReplyDirectoryPlus {
             entries: futures_util::stream::iter(entries),
         })
