@@ -1,5 +1,5 @@
 use fuse::Fuse;
-use std::{os::unix::ffi::OsStringExt, sync::atomic::AtomicBool};
+use std::{os::unix::ffi::{OsStrExt, OsStringExt}, sync::atomic::AtomicBool};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -94,73 +94,50 @@ fn add(Add { file, tags }: Add, db: &rusqlite::Connection) -> Result<()> {
 /// Mounts the virtual filesystem.
 ///
 /// Blocks until unmounted or interrupted.
-fn mount(mountpoint: &std::path::Path, db_path: impl AsRef<std::path::Path>) -> Result<()> {
-    use std::sync::*;
-
+fn mount(mountpoint: &std::path::Path, db_path: impl Into<std::path::PathBuf>) -> Result<()> {
     if !mountpoint.try_exists()? {
         return Err(anyhow!("The directory {mountpoint:?} does not exist"));
     }
 
-    let pair = Arc::new((Mutex::new(false), Condvar::new()));
-    let pair2 = Arc::clone(&pair);
-    let pair3 = Arc::clone(&pair);
-    ctrlc::set_handler(move || {
-        let (lock, cvar) = &*pair2;
-        let mut started = lock.lock().unwrap();
-        *started = true;
-        // We notify the condvar that the value has changed.
-        cvar.notify_one();
-    })
-    .unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(mount_async(fuse::Fuse::new(db_path), mountpoint))
+}
 
-    let handle = fuser::spawn_mount2(
-        Fuse::new(db_path)?,
-        mountpoint,
-        &[fuser::MountOption::FSName("tg".to_owned())],
-    )
-    .unwrap();
+async fn mount_async(fs: fuse::Fuse, mountpoint: &std::path::Path) -> Result<()> {
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    let mut mount_options = fuse3::MountOptions::default();
+    mount_options.uid(uid).gid(gid);
+    let mut mount_handle = fuse3::path::Session::new(mount_options)
+        .mount_with_unprivileged(fs, mountpoint)
+        .await
+        .unwrap();
     eprintln!("Mounted successfully to {mountpoint:?}");
-
-    let handle = std::sync::Arc::new(std::sync::Mutex::new(Some(handle)));
-    let handle2 = handle.clone();
-    std::thread::spawn(move || {
-        loop {
-            let finished = handle2
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|h| h.guard.is_finished());
-            match finished {
-                Some(true) => break,
-                Some(false) => {
-                    std::thread::yield_now();
-                    continue;
+    
+    let handle = &mut mount_handle;
+    
+    tokio::select! {
+        res = handle => {
+            println!("[tg::unmounted] Unmounted manually");
+            res.unwrap()
+        },
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("[tg::unmounted] Process killed via signal");
+            loop {
+                // need to resort to Command as MountHandle::unmount can't be retried if an error happens
+                let cmd = || std::process::Command::new("umount").arg(mountpoint.display().to_string()).output();
+                let out = cmd()?;
+                if out.status.success() {
+                    eprintln!("[tg::unmount] Filesystem unmounted");
+                    break;
                 }
-                None => {
-                    eprintln!("[tg::unmounted] Process killed via signal");
-                    return
-                },
+                eprintln!("[tg::unmount] Error {:?}", String::from_utf8(out.stderr).unwrap());
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             }
         }
-        
-        eprintln!("[tg::unmounted] Unmounted manually");
-        let (lock, cvar) = &*pair3;
-        let mut started = lock.lock().unwrap();
-        *started = true;
-        // We notify the condvar that the value has changed.
-        cvar.notify_one();
-    });
-
-    // Wait for the threads to end.
-    let (lock, cvar) = &*pair;
-    let mut started = lock.lock().unwrap();
-    while !*started {
-        started = cvar.wait(started).unwrap();
-    }
-
-    if let Some(handle) = handle.lock().unwrap().take() {
-        handle.join();
-    }
-
+    };
     Ok(())
 }
