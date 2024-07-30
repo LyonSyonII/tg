@@ -7,12 +7,15 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.5.11", features = ["derive"] }
 directories = "5.0.1"
-bitcode = "0.6.3"
 anyhow = { version = "1.0.86" }
 fuser = "0.14.0"
 libc = "0.2.155"
 ctrlc = "3.4.4"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
+
+[dev-dependencies]
+fake = "2.9.2"
+rand = "0.8.5"
 
 [profile.dev]
 debug = 0

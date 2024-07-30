@@ -48,7 +48,7 @@ fn main() -> Result<()> {
     db.execute_batch(include_str!("./sql/migrations.sql"))?;
 
     let config = db
-        .query_row("select * from Config;", [], |r| {
+        .query_row("select * from Config", [], |r| {
             let mountpoint = r
                 .get(1)
                 .ok()
@@ -88,7 +88,7 @@ fn add(
     if !file.try_exists()? {
         return Err(anyhow!("The file {file:?} does not exist"));
     }
-
+    
     let separator = format!("\"),({file:?},\"");
     db.execute(
         &format!(
@@ -114,7 +114,8 @@ fn mount(mountpoint: &std::path::Path, db: &rusqlite::Connection) -> Result<()> 
     let rows = files_stmt.query_map([], |r| r.get::<_, String>(0))?;
     let mut tags_stmt = db.prepare_cached("select tag from FileTags where file = ?")?;
     for file in rows.flatten() {
-        let tags = tags_stmt.query_map([&file], |r| r.get::<_, String>(0))?
+        let tags = tags_stmt
+            .query_map([&file], |r| r.get::<_, String>(0))?
             .flatten()
             .collect::<Vec<_>>();
         println!("{file}: {tags:?}");
