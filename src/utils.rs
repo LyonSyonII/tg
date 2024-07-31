@@ -1,34 +1,45 @@
-pub struct Lazy<T> {
-    value: std::cell::UnsafeCell<Option<T>>,
-    f: fn() -> T,
+pub struct ConsoleLogger;
+
+impl log::Log for ConsoleLogger {
+    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        println!("{}: {}: {}", record.target(), record.level(), record.args());
+    }
+
+    fn flush(&self) {}
 }
 
-impl<T> Lazy<T> {
-    pub const fn new(f: fn() -> T) -> Self {
-        Self {
-            value: std::cell::UnsafeCell::new(None),
-            f,
-        }
-    }
+#[allow(private_interfaces)]
+pub static LOGGER: ConsoleLogger = ConsoleLogger;
 
-    pub fn get(&self) -> &T {
-        let value = unsafe { &mut *self.value.get() };
-        if value.is_none() {
-            *value = Some((self.f)());
-        }
-        value.as_ref().unwrap()
-    }
+/// Unwraps the `Result` or panics with the provided message.
+///
+/// # Examples
+/// ```
+/// use tg::ok_or_panic;
+/// let n = ok_or_panic!(std::thread::spawn(|| 5).join(), "Error spawning thread");
+/// ```
+#[macro_export]
+macro_rules! ok_or_panic {
+    ($expr:expr, $($tt:tt)*) => {
+        ::anyhow::Context::with_context($expr, || format!($($tt)*)).unwrap()
+    };
 }
 
-unsafe impl<T> Sync for Lazy<T> {}
-
-#[cfg(test)]
-mod tests {
-    use crate::utils::Lazy;
-
-    #[test]
-    fn lazy() {
-        static LAZY: Lazy<Vec<u8>> = Lazy::new(|| b"hello".to_vec());
-        assert_eq!(LAZY.get(), b"hello");
-    }
+/// Unwraps the `Option` or panics with the provided message.
+///
+/// # Examples
+/// ```should_panic
+/// use tg::or_panic;
+/// let vec = Vec::<u8>::new();
+/// let first = or_panic!(vec.first(), "Vec should have at least one element!");
+/// ```
+#[macro_export]
+macro_rules! or_panic {
+    ($expr:expr, $($tt:tt)*) => {
+        ::anyhow::Context::with_context($expr, || format!($($tt)*)).unwrap()
+    };
 }

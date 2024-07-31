@@ -53,24 +53,12 @@ fn select(db: &Connection) -> Result<()> {
         ) and tag not in {list};"#,
         tags.len()
     );
-    /*      let stmt = format!(r#"
-    select file from FileTags
-    where tag in {list}
-    group by file
-    having count(*) = {}"#, tags.len()); */
     let mut stmt = db.prepare(&stmt)?;
     let mut rows = stmt.query([])?;
 
     while let Ok(Some(r)) = rows.next() {
         let file: &str = r.get_ref(0)?.as_str()?;
-        // let tags = {
-        //     let mut stmt = db.prepare("select tag from FileTags where file = ?")?;
-        //     let rows = stmt.query_map([file], |r| r.get::<_, String>(0))?;
-        //     rows.flatten().collect::<Vec<_>>()
-        // };
-        // let tag = r.get_ref(1)?.as_str()?;
         eprintln!("{file}");
-        // eprintln!("{file}: {tags:?}");
     }
 
     Ok(())

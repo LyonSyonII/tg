@@ -1,81 +1,28 @@
-use fuse::Fuse;
-use std::os::unix::prelude::OsStringExt;
-use fuse_mt as fusemt;
-use anyhow::{anyhow, Context, Result};
-
+mod cli;
+mod config;
 mod fuse;
 mod utils;
 
-#[derive(clap::Parser, Debug, Clone)]
-#[command(version, about, args_conflicts_with_subcommands = true)]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
+use anyhow::{anyhow, Context, Result};
+use cli::{Cli, Commands};
+use config::Config;
+use fuse_mt as fusemt;
+use log::{debug, info};
 
-    #[clap(flatten)]
-    add: Add,
-}
-
-#[derive(clap::Subcommand, Debug, Clone)]
-enum Commands {
-    /// Sets the mountpoint for the tag filesystem.
-    Mount { mountpoint: std::path::PathBuf },
-}
-
-#[derive(clap::Args, Debug, Clone)]
-struct Add {
-    #[clap(required = true)]
-    file: Option<std::path::PathBuf>,
-    #[clap(required = true)]
-    tags: Vec<String>,
-}
-
-struct Config {
-    mountpoint: Option<std::path::PathBuf>,
-}
-
-struct ConsoleLogger;
-
-impl log::Log for ConsoleLogger {
-    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
-        true
-    }
-    
-    fn log(&self, record: &log::Record<'_>) {
-        println!("{}: {}: {}", record.target(), record.level(), record.args());
-    }
-    
-    fn flush(&self) {}
-}
-
-static LOGGER: ConsoleLogger = ConsoleLogger;
+#[cfg(not(target_os = "linux"))]
+const IS_LINUX: () = const { compile_error!("[tg] This crate only works on Linux due to FUSE.") };
 
 fn main() -> Result<()> {
-
-    log::set_logger(&LOGGER).unwrap();
+    log::set_logger(&tg::utils::LOGGER).unwrap();
     log::set_max_level(log::LevelFilter::Debug);
 
-    let cli = <Cli as clap::Parser>::parse();
+    let cli = Cli::parse();
 
-    let dirs = directories::ProjectDirs::from("dev", "lyonsyonii", "tg")
-        .ok_or(anyhow!("Unable to create the application's data directory"))?;
-    let local = dirs.data_dir();
-    std::fs::create_dir_all(local)?;
-    let db_path = local.join("db.sqlite");
+    let mut config = config::Config::load()?;
 
+    let db_path = config.db_path().to_path_buf();
     let db = rusqlite::Connection::open(&db_path).context("Database Creation")?;
-
     db.execute_batch(include_str!("./sql/migrations.sql"))?;
-
-    let config = db
-        .query_row("select * from Config", [], |r| {
-            let mountpoint = r
-                .get(1)
-                .ok()
-                .map(|m: String| std::ffi::OsString::from_vec(m.into_bytes()).into());
-            Ok(Config { mountpoint })
-        })
-        .context("Get Config")?;
 
     let Some(command) = cli.command else {
         // no subcommand specified, add entry
@@ -84,22 +31,37 @@ fn main() -> Result<()> {
 
     match command {
         Commands::Mount { mountpoint } => {
-            mount(&mountpoint, db_path)?;
-            db.execute(
-                "update Config set mountpoint = ?",
-                [mountpoint.display().to_string()],
-            )?;
+            if let Some(mountpoint) = mountpoint {
+                if !mountpoint.try_exists()? {
+                    return Err(anyhow!("the directory {mountpoint:?} does not exist"));
+                }
+                config.set_mountpoint(mountpoint)?;
+            } else if config.mountpoint().is_none() {
+                return Err(anyhow!(
+                    "no default mountpoint found, set it with 'tg mount MOUNTPOINT'"
+                ));
+            }
+            mount(db_path, config)?;
+        }
+        Commands::Set(cli::Set { key }) => {
+            let msg = format!("{key:?} set successfully");
+            match key {
+                cli::ConfigValues::TagPrefix { value } => config.set_tag_prefix(value)?,
+                cli::ConfigValues::FilePrefix { value } => config.set_file_prefix(value)?,
+            }
+            info!("{msg}");
         }
     }
 
     Ok(())
 }
 
-fn add(Add { file, tags }: Add, db: &rusqlite::Connection) -> Result<()> {
+fn add(cli::Add { file, tags }: cli::Add, db: &rusqlite::Connection) -> Result<()> {
     let file = file
         .ok_or_else(|| anyhow!("Called \"add\" without \"file\" argument"))?
         .canonicalize()?;
-    eprintln!("Adding {file:?} : {tags:?}");
+
+    debug!("Adding {file:?} : {tags:?}");
 
     if !file.try_exists()? {
         return Err(anyhow!("The file {file:?} does not exist"));
@@ -114,14 +76,22 @@ fn add(Add { file, tags }: Add, db: &rusqlite::Connection) -> Result<()> {
 /// Mounts the virtual filesystem.
 ///
 /// Blocks until unmounted or interrupted.
-fn mount(mountpoint: &std::path::Path, db_path: impl Into<std::path::PathBuf>) -> Result<()> {
-    use std::sync::{ Arc, Mutex, Condvar };
-    if !mountpoint.try_exists()? {
-        return Err(anyhow!("The directory {mountpoint:?} does not exist"));
-    }
+fn mount(db_path: impl Into<std::path::PathBuf>, config: Config) -> Result<()> {
+    use std::sync::{Arc, Condvar, Mutex};
+    let mountpoint = or_panic!(
+        config.mountpoint().map(ToOwned::to_owned),
+        "Called mount without mountpoint set"
+    );
     
-    let handle = fusemt::spawn_mount(fusemt::FuseMT::new(fuse::Fuse::new(db_path), std::thread::available_parallelism()?.get()), mountpoint, &[])?;
-    eprintln!("Mounted successfully to {mountpoint:?}");
+    let handle = fusemt::spawn_mount(
+        fusemt::FuseMT::new(
+            fuse::Fuse::new(db_path, config),
+            std::thread::available_parallelism()?.get(),
+        ),
+        &mountpoint,
+        &[],
+    )?;
+    info!("Mounted successfully to {mountpoint:?}");
 
     let unmounted = Arc::new((Mutex::new(false), Condvar::new()));
     let killed = Arc::clone(&unmounted);
@@ -129,27 +99,27 @@ fn mount(mountpoint: &std::path::Path, db_path: impl Into<std::path::PathBuf>) -
         let (lock, cvar) = &*killed;
         let mut killed = lock.lock().unwrap();
         *killed = true;
-        // We notify the condvar that the value has changed.
         cvar.notify_one();
-        eprintln!("[tg::unmounted] Process killed via signal");
+        debug!("[tg::unmounted] Process killed via signal");
     })?;
     let unmounted_extern = Arc::clone(&unmounted);
     std::thread::spawn(move || {
         handle.guard.join().unwrap().unwrap();
         let (lock, cvar) = &*unmounted_extern;
         let mut unmounted = lock.lock().unwrap();
-        *unmounted = true;
-        // We notify the condvar that the value has changed.
-        cvar.notify_one();
-        eprintln!("[tg::unmounted] Unmounted manually");
+        if !*unmounted {
+            *unmounted = true;
+            cvar.notify_one();
+            debug!("[tg::unmounted] Unmounted manually");
+        }
     });
-    
+
     let (lock, cvar) = &*unmounted;
     let mut unmounted = lock.lock().unwrap();
     while !*unmounted {
         unmounted = cvar.wait(unmounted).unwrap();
     }
-    eprintln!("[tg::unmount] Filesystem unmounted");
-    
+    info!("Filesystem unmounted");
+
     Ok(())
 }
