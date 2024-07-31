@@ -1,46 +1,45 @@
 use std::path::PathBuf;
 
-#[derive(clap::Parser, Debug)]
-#[command(version, about, args_conflicts_with_subcommands = true)]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: Option<Commands>,
+use bpaf::Bpaf;
 
-    #[clap(flatten)]
-    pub add: Add,
-}
-
-impl Cli {
-    pub fn parse() -> Self {
-        <Cli as clap::Parser>::parse()
-    }
-}
-
-#[derive(clap::Subcommand, Debug)]
-pub enum Commands {
-    /// Sets the mountpoint for the tag filesystem.
-    Mount {
-        mountpoint: Option<std::path::PathBuf>,
+#[derive(Bpaf, Debug, Clone)]
+#[bpaf(options, generate(parse))]
+pub enum Cli {
+    /// Adds TAGS to FILE, will create the tags that don't exist.
+    ///
+    /// Example: 'tg add Cargo.toml toml rust dev config'
+    #[bpaf(command)]
+    Add {
+        #[bpaf(positional("FILE"))]
+        file: PathBuf,
+        #[bpaf(positional("TAGS"))]
+        tags: Vec<String>,
     },
-    Set(Set),
+    /// Mounts the filesystem to the specified MOUNTPOINT or the previous one if skipped
+    ///
+    /// Example: 'tg mount ~/Tags'
+    #[bpaf(command)]
+    Mount {
+        #[bpaf(positional("MOUNTPOINT"), optional)]
+        mountpoint: Option<PathBuf>,
+    },
+    #[bpaf(command)]
+    Set {
+        #[bpaf(external)]
+        set: Set,
+    },
 }
 
-#[derive(clap::Args, Debug)]
-pub struct Add {
-    #[clap(required = true)]
-    pub file: Option<std::path::PathBuf>,
-    #[clap(required = true)]
-    pub tags: Vec<String>,
-}
-
-#[derive(clap::Args, Debug)]
-pub struct Set {
-    #[command(subcommand)]
-    pub key: ConfigValues,
-}
-
-#[derive(clap::Subcommand, Debug)]
-pub enum ConfigValues {
-    TagPrefix { value: String },
-    FilePrefix { value: String },
+#[derive(Bpaf, Debug, Clone)]
+pub enum Set {
+    #[bpaf(command)]
+    TagPrefix {
+        #[bpaf(positional("VALUE"))]
+        value: String,
+    },
+    #[bpaf(command)]
+    FilePrefix {
+        #[bpaf(positional("VALUE"))]
+        value: String,
+    },
 }

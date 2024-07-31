@@ -3,8 +3,10 @@ mod config;
 mod fuse;
 mod utils;
 
+use std::path::PathBuf;
+
 use anyhow::{anyhow, Context, Result};
-use cli::{Cli, Commands};
+use cli::Cli;
 use config::Config;
 use fuse_mt as fusemt;
 use log::{debug, info};
@@ -16,50 +18,30 @@ fn main() -> Result<()> {
     log::set_logger(&tg::utils::LOGGER).unwrap();
     log::set_max_level(log::LevelFilter::Debug);
 
-    let cli = Cli::parse();
+    let cli = cli::parse().run();
 
-    let mut config = config::Config::load()?;
+    let config = config::Config::load()?;
 
     let db_path = config.db_path().to_path_buf();
-    let db = rusqlite::Connection::open(&db_path).context("Database Creation")?;
+    let db = rusqlite::Connection::open(&db_path).context("database creation failed")?;
     db.execute_batch(include_str!("./sql/migrations.sql"))?;
 
-    let Some(command) = cli.command else {
-        // no subcommand specified, add entry
-        return add(cli.add, &db);
-    };
-
-    match command {
-        Commands::Mount { mountpoint } => {
-            if let Some(mountpoint) = mountpoint {
-                if !mountpoint.try_exists()? {
-                    return Err(anyhow!("the directory {mountpoint:?} does not exist"));
-                }
-                config.set_mountpoint(mountpoint)?;
-            } else if config.mountpoint().is_none() {
-                return Err(anyhow!(
-                    "no default mountpoint found, set it with 'tg mount MOUNTPOINT'"
-                ));
-            }
-            mount(db_path, config)?;
-        }
-        Commands::Set(cli::Set { key }) => {
-            let msg = format!("{key:?} set successfully");
-            match key {
-                cli::ConfigValues::TagPrefix { value } => config.set_tag_prefix(value)?,
-                cli::ConfigValues::FilePrefix { value } => config.set_file_prefix(value)?,
-            }
-            info!("{msg}");
-        }
+    match cli {
+        Cli::Add { file, tags } => add(file, tags, &db)?,
+        Cli::Mount { mountpoint } => mount(mountpoint, db_path, config)?,
+        Cli::Set { set: s } => set(s, config)?,
     }
 
     Ok(())
 }
 
-fn add(cli::Add { file, tags }: cli::Add, db: &rusqlite::Connection) -> Result<()> {
-    let file = file
-        .ok_or_else(|| anyhow!("Called \"add\" without \"file\" argument"))?
-        .canonicalize()?;
+fn add(
+    file: impl AsRef<std::path::Path>,
+    tags: impl AsRef<[String]>,
+    db: &rusqlite::Connection,
+) -> Result<()> {
+    let file = file.as_ref().canonicalize()?;
+    let tags = tags.as_ref();
 
     debug!("Adding {file:?} : {tags:?}");
 
@@ -76,13 +58,27 @@ fn add(cli::Add { file, tags }: cli::Add, db: &rusqlite::Connection) -> Result<(
 /// Mounts the virtual filesystem.
 ///
 /// Blocks until unmounted or interrupted.
-fn mount(db_path: impl Into<std::path::PathBuf>, config: Config) -> Result<()> {
+fn mount(
+    mountpoint: Option<PathBuf>,
+    db_path: impl Into<std::path::PathBuf>,
+    mut config: Config,
+) -> Result<()> {
     use std::sync::{Arc, Condvar, Mutex};
-    let mountpoint = or_panic!(
-        config.mountpoint().map(ToOwned::to_owned),
-        "Called mount without mountpoint set"
-    );
-    
+
+    let mountpoint = match (mountpoint, config.mountpoint()) {
+        (Some(mountpoint), _) => {
+            if !mountpoint.try_exists()? {
+                return Err(anyhow!("the directory {mountpoint:?} does not exist"));
+            }
+            config.set_mountpoint(mountpoint.clone())?;
+            mountpoint
+        }
+        (None, Some(mountpoint)) => mountpoint.to_path_buf(),
+        (None, None) => {
+            anyhow::bail!("no default mountpoint found, set it with 'tg mount MOUNTPOINT'")
+        }
+    };
+
     let handle = fusemt::spawn_mount(
         fusemt::FuseMT::new(
             fuse::Fuse::new(db_path, config),
@@ -121,5 +117,15 @@ fn mount(db_path: impl Into<std::path::PathBuf>, config: Config) -> Result<()> {
     }
     info!("Filesystem unmounted");
 
+    Ok(())
+}
+
+fn set(key: cli::Set, mut config: Config) -> Result<()> {
+    let msg = format!("{key:?} set successfully");
+    match key {
+        cli::Set::TagPrefix { value } => config.set_tag_prefix(value)?,
+        cli::Set::FilePrefix { value } => config.set_file_prefix(value)?,
+    }
+    info!("{msg}");
     Ok(())
 }

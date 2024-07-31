@@ -91,7 +91,7 @@ impl Fuse {
             debug!("SEARCHING DATABASE FOR TAG {tag:?}");
             db.query_row(
                 "select 1 from FileTags where tag = ? limit 1",
-                [tag.to_string_lossy()],
+                [&tag.to_string_lossy()[1..]],
                 |r| r.get::<_, u8>(0),
             )
             .ok()
@@ -150,47 +150,63 @@ impl fusemt::FilesystemMT for Fuse {
             return Err(libc::ENOENT);
         }
 
-        let tags = path.components().skip(1).map(|c| c.as_os_str());
+        let tags = path
+            .components()
+            .skip(1)
+            .flat_map(|c| std::str::from_utf8(c.as_os_str().as_bytes()))
+            .map(|s| &s[1..]);
 
         let db = ok_or_panic!(
             self.connect_db(),
             "failed to connect to sqlite database in {:?}",
             self.db_path
         );
-        let (len, list) = tg::list_to_sql(tags);
+        let (tags_len, tags_list) = tg::list_to_sql(tags);
         let stmt = format!(
             r#"
-                select '_' || file from FileTags
-                where tag in {list}
+                select file from FileTags
+                where tag in {tags_list}
                 group by file 
-                having count(*) = {}
-            "#,
-            len
+                having count(*) = {tags_len}
+            "#
         );
         let mut prep_stmt = db.prepare_cached(&stmt).unwrap();
         let files = prep_stmt
             .query_map([], |r| {
-                let name = std::ffi::OsString::from(r.get::<_, String>(0)?);
+                let name = std::ffi::OsString::from(format!("_{}", r.get_ref(0)?.as_str()?.split('/').last().unwrap()));
                 let kind = fusemt::FileType::Symlink;
                 Ok((name, kind))
             })
             .unwrap()
             .flatten();
 
-        let stmt = format!(
-            r#"
-            select ':' || tag from FileTags where file in (
-                {stmt}
-            ) and tag not in {list};
-        "#
-        );
-        let mut prep_stmt = db.prepare_cached(&stmt).unwrap();
+        let stmt = if path.file_name().is_none() {
+            "select distinct tag from FileTags;"
+        } else {
+            &format!(
+                r#"
+                select distinct tag from FileTags where file in (
+                    {stmt}
+                ) and tag not in {tags_list};
+            "#
+            )
+        };
+        let mut prep_stmt = db.prepare_cached(stmt).unwrap();
+        let tags = prep_stmt
+            .query_map([], |r| {
+                let name = std::ffi::OsString::from(format!(":{}", r.get_ref(0)?.as_str()?));
+                let kind = fusemt::FileType::Directory;
+                Ok((name, kind))
+            })
+            .unwrap()
+            .flatten();
 
         let entries = [
             (std::ffi::OsString::from("."), fusemt::FileType::Directory),
             (std::ffi::OsString::from(".."), fusemt::FileType::Directory),
         ]
         .into_iter()
+        .chain(tags)
         .chain(files)
         .map(|(name, kind)| fusemt::DirectoryEntry { name, kind })
         .collect();

@@ -9,8 +9,8 @@ fn main() -> Result<()> {
         .ok_or(anyhow!("Unable to create the application's data directory"))?;
     let local = dirs.data_dir();
     std::fs::create_dir_all(local)?;
-    let mut db =
-        rusqlite::Connection::open(local.join("db.sqlite")).context("Database Creation")?;
+    let db =
+        rusqlite::Connection::open(local.join("db.sqlite")).context("database creation failed")?;
 
     // drop(&db)?;
     // insert(&mut db)?;

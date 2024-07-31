@@ -5,7 +5,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
 directories = "5.0"
 anyhow = { version = "1.0" }
 libc = "0.2"
@@ -15,6 +14,8 @@ fuse_mt = { version = "0.6.1" }
 log = "0.4"
 confy = "0.6.1"
 serde = { version = "1.0", features = ["derive"] }
+bpaf = { version = "0.9.12", features = ["bright-color", "autocomplete", "derive"] }
+bpaf_derive = "0.5.10"
 
 [dev-dependencies]
 fake = "2.9"
@@ -25,6 +26,6 @@ debug = 0
 codegen-backend = "cranelift"
 
 [profile.release]
-lto = "thin"
+lto = true
 codegen-units = 1
 panic = "abort"
