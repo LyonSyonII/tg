@@ -1,3 +1,4 @@
 **/target
 .direnv
 mountpoint
+fuse-mt

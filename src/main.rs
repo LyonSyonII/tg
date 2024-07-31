@@ -1,9 +1,6 @@
 use fuse::Fuse;
-use std::{
-    os::unix::ffi::{OsStrExt, OsStringExt},
-    sync::atomic::AtomicBool,
-};
-
+use std::os::unix::prelude::OsStringExt;
+use fuse_mt as fusemt;
 use anyhow::{anyhow, Context, Result};
 
 mod fuse;
@@ -37,7 +34,27 @@ struct Config {
     mountpoint: Option<std::path::PathBuf>,
 }
 
+struct ConsoleLogger;
+
+impl log::Log for ConsoleLogger {
+    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+        true
+    }
+    
+    fn log(&self, record: &log::Record<'_>) {
+        println!("{}: {}: {}", record.target(), record.level(), record.args());
+    }
+    
+    fn flush(&self) {}
+}
+
+static LOGGER: ConsoleLogger = ConsoleLogger;
+
 fn main() -> Result<()> {
+
+    log::set_logger(&LOGGER).unwrap();
+    log::set_max_level(log::LevelFilter::Debug);
+
     let cli = <Cli as clap::Parser>::parse();
 
     let dirs = directories::ProjectDirs::from("dev", "lyonsyonii", "tg")
@@ -98,50 +115,41 @@ fn add(Add { file, tags }: Add, db: &rusqlite::Connection) -> Result<()> {
 ///
 /// Blocks until unmounted or interrupted.
 fn mount(mountpoint: &std::path::Path, db_path: impl Into<std::path::PathBuf>) -> Result<()> {
+    use std::sync::{ Arc, Mutex, Condvar };
     if !mountpoint.try_exists()? {
         return Err(anyhow!("The directory {mountpoint:?} does not exist"));
     }
-
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(mount_async(fuse::Fuse::new(db_path), mountpoint))
-}
-
-async fn mount_async(fs: fuse::Fuse, mountpoint: &std::path::Path) -> Result<()> {
-    let uid = unsafe { libc::getuid() };
-    let gid = unsafe { libc::getgid() };
-    let mut mount_options = fuse3::MountOptions::default();
-    mount_options.uid(uid).gid(gid).force_readdir_plus(true);
     
-    let mut mount_handle = fuse3::path::Session::new(mount_options)
-        .mount_with_unprivileged(fs, mountpoint)
-        .await
-        .unwrap();
+    let handle = fusemt::spawn_mount(fusemt::FuseMT::new(fuse::Fuse::new(db_path), std::thread::available_parallelism()?.get()), mountpoint, &[])?;
     eprintln!("Mounted successfully to {mountpoint:?}");
 
-    let handle = &mut mount_handle;
-
-    tokio::select! {
-        res = handle => {
-            println!("[tg::unmounted] Unmounted manually");
-            res.unwrap()
-        },
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("[tg::unmounted] Process killed via signal");
-            loop {
-                // need to resort to Command as MountHandle::unmount can't be retried if an error happens
-                let cmd = || std::process::Command::new("umount").arg(mountpoint.display().to_string()).output();
-                let out = cmd()?;
-                if out.status.success() {
-                    eprintln!("[tg::unmount] Filesystem unmounted");
-                    break;
-                }
-                eprintln!("[tg::unmount] Error {:?}", String::from_utf8(out.stderr).unwrap());
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-            }
-        }
-    };
+    let unmounted = Arc::new((Mutex::new(false), Condvar::new()));
+    let killed = Arc::clone(&unmounted);
+    ctrlc::set_handler(move || {
+        let (lock, cvar) = &*killed;
+        let mut killed = lock.lock().unwrap();
+        *killed = true;
+        // We notify the condvar that the value has changed.
+        cvar.notify_one();
+        eprintln!("[tg::unmounted] Process killed via signal");
+    })?;
+    let unmounted_extern = Arc::clone(&unmounted);
+    std::thread::spawn(move || {
+        handle.guard.join().unwrap().unwrap();
+        let (lock, cvar) = &*unmounted_extern;
+        let mut unmounted = lock.lock().unwrap();
+        *unmounted = true;
+        // We notify the condvar that the value has changed.
+        cvar.notify_one();
+        eprintln!("[tg::unmounted] Unmounted manually");
+    });
+    
+    let (lock, cvar) = &*unmounted;
+    let mut unmounted = lock.lock().unwrap();
+    while !*unmounted {
+        unmounted = cvar.wait(unmounted).unwrap();
+    }
+    eprintln!("[tg::unmount] Filesystem unmounted");
+    
     Ok(())
 }

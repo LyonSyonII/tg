@@ -16,7 +16,7 @@ pub fn list_to_values(key: impl std::fmt::Debug, list: impl AsRef<[String]>) -> 
 
 pub fn list_to_sql<S: std::fmt::Debug>(list: impl IntoIterator<Item = S>) -> (usize, String) {
     let mut list = list.into_iter();
-    
+
     let mut len = 0;
     let mut acc = String::from("(");
     if let Some(f) = list.next() {
