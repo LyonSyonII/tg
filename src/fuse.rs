@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     hash::{Hash, Hasher},
     os::unix::ffi::OsStrExt,
     time::UNIX_EPOCH,
@@ -7,10 +7,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use fuse_mt as fusemt;
-use log::debug;
+use log::{debug, info};
 
-use crate::Config;
-use tg::ok_or_panic;
+use crate::{config::Config, ok_or_panic};
 
 const TTL: std::time::Duration = std::time::Duration::from_secs(1); // 1 second
 
@@ -55,6 +54,14 @@ pub struct Fuse {
     config: Config,
 }
 
+#[derive(Debug)]
+enum Name<'a> {
+    File(&'a OsStr),
+    Tag(&'a OsStr),
+    Root,
+    None,
+}
+
 impl Fuse {
     pub fn new(db_path: impl Into<std::path::PathBuf>, config: Config) -> Self {
         Fuse {
@@ -63,43 +70,54 @@ impl Fuse {
         }
     }
 
-    pub fn connect_db(&self) -> Result<rusqlite::Connection> {
+    fn connect_db(&self) -> rusqlite::Result<rusqlite::Connection> {
         use rusqlite::OpenFlags;
-        Ok(rusqlite::Connection::open_with_flags(
+        rusqlite::Connection::open_with_flags(
             &self.db_path,
             OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?)
+        )
     }
 
-    pub fn connect_db_mut(&self) -> Result<rusqlite::Connection> {
+    fn connect_db_mut(&self) -> rusqlite::Result<rusqlite::Connection> {
         use rusqlite::OpenFlags;
-        Ok(rusqlite::Connection::open_with_flags(
+        rusqlite::Connection::open_with_flags(
             &self.db_path,
             OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?)
+        )
     }
 
-    pub fn tag_exists(&self, path: &std::path::Path) -> bool {
-        let is_valid = |name: &std::ffi::OsStr| {
+    fn name_exists<'a>(&self, path: &'a std::path::Path) -> rusqlite::Result<Name<'a>> {
+        fn is_valid<'a>(name: &'a OsStr, config: &Config) -> Name<'a> {
             let bytes = name.as_bytes();
-            bytes.starts_with(self.config.file_prefix().as_bytes())
-                || bytes.starts_with(self.config.tag_prefix().as_bytes())
-        };
+            if bytes.starts_with(config.file_prefix().as_bytes()) {
+                Name::File(OsStr::from_bytes(&bytes[1..]))
+            } else if bytes.starts_with(config.tag_prefix().as_bytes()) {
+                Name::Tag(OsStr::from_bytes(&bytes[1..]))
+            } else {
+                Name::None
+            }
+        }
 
-        let check_db = |tag: &std::ffi::OsStr| {
-            let db = self.connect_db().ok()?;
-            debug!("SEARCHING DATABASE FOR TAG {tag:?}");
-            db.query_row(
-                "select 1 from FileTags where tag = ? limit 1",
-                [&tag.to_string_lossy()[1..]],
-                |r| r.get::<_, u8>(0),
-            )
-            .ok()
+        let check_db = |name: &Name| {
+            let db = self.connect_db()?;
+            debug!("SEARCHING DATABASE FOR {name:?}");
+            let (query, value) = match name {
+                Name::File(file) => ("select 1 from Files where file = ? limit 1", &file.to_string_lossy()),
+                Name::Tag(tag) => ("select 1 from Tags where tag = ? limit 1", &tag.to_string_lossy()),
+                Name::None => return Ok(false),
+                Name::Root => unreachable!(),
+            };
+            let mut stmt = db.prepare_cached(query)?;
+            stmt.exists([value])
         };
+        
+        if path == std::path::Path::new("/") {
+            return Ok(Name::Root);
+        }
 
-        match path.file_name() {
-            Some(name) => is_valid(name) && check_db(name).is_some(),
-            None => true,
+        match path.file_name().map(|n| is_valid(n, &self.config)) {
+            Some(name) if check_db(&name)? => Ok(name),
+            _ => Ok(Name::None),
         }
     }
 }
@@ -113,12 +131,18 @@ impl fusemt::FilesystemMT for Fuse {
     ) -> fusemt::ResultEntry {
         debug!("[getattr] path = {path:?}");
 
-        if !self.tag_exists(path) {
-            debug!("[getattr] Path {path:?} does not exist");
-            return Err(libc::ENOENT);
+        let exists = ok_or_panic!(
+            self.name_exists(path),
+            "[getattr] database connection failed"
+        );
+        match exists {
+            Name::File(_) => Ok((TTL, LINK_ATTR)),
+            Name::Tag(_) | Name::Root => Ok((TTL, ROOT_DIR_ATTR)),
+            Name::None => {
+                debug!("[getattr] path {path:?} does not exist");
+                Err(libc::ENOENT)
+            }
         }
-
-        Ok((TTL, ROOT_DIR_ATTR))
     }
 
     fn opendir(
@@ -127,10 +151,7 @@ impl fusemt::FilesystemMT for Fuse {
         path: &std::path::Path,
         flags: u32,
     ) -> fuse_mt::ResultOpen {
-        debug!(
-            "[opendir] path = {path:?}, flags = {:?}",
-            flags.to_le_bytes()
-        );
+        debug!("[opendir] path = {path:?}, flags = {flags:#o}");
         let mut hasher = std::hash::DefaultHasher::new();
         path.hash(&mut hasher);
         Ok((hasher.finish(), 0))
@@ -142,12 +163,40 @@ impl fusemt::FilesystemMT for Fuse {
         path: &std::path::Path,
         fh: u64,
     ) -> fuse_mt::ResultReaddir {
-        // TODO: Allow configuring file and tag prefix
         debug!("[readdir] path = {path:?}, fh = {fh}");
 
-        if !self.tag_exists(path) {
-            debug!("[readdir] Path {path:?} does not exist");
-            return Err(libc::ENOENT);
+        let exists = ok_or_panic!(
+            self.name_exists(path),
+            "[readdir] database connection failed"
+        );
+        match exists {
+            Name::Tag(_) => {}
+            Name::Root => {
+                info!("[readdir::sqlite] '/' tag query");
+                let instant = std::time::Instant::now();
+                
+                let db = self.connect_db().unwrap();
+                let mut stmt = db.prepare_cached(r#"
+                    SELECT tag 
+                    FROM Tags t
+                    WHERE EXISTS (
+                        SELECT 1 
+                        FROM FileTags ft 
+                        WHERE ft.tagId = t.id
+                    )
+                "#).unwrap();
+                let entries = stmt.query_map([], |r| {
+                    let name = format!("{}{}", self.config.tag_prefix(), r.get_ref(0)?.as_str()?).into();
+                    Ok(fusemt::DirectoryEntry { name, kind: fusemt::FileType::Directory })
+                })
+                .unwrap()
+                .flatten()
+                .collect();
+                info!("[readdir::sqlite] '/' tag query done in {:?}", instant.elapsed());
+                return Ok(entries);
+            }
+            Name::File(_) => return Err(libc::ENOTDIR),
+            Name::None => return Err(libc::ENOENT),
         }
 
         let tags = path
@@ -158,59 +207,73 @@ impl fusemt::FilesystemMT for Fuse {
 
         let db = ok_or_panic!(
             self.connect_db(),
-            "failed to connect to sqlite database in {:?}",
-            self.db_path
+            "[readdir] failed to connect to sqlite database"
         );
-        let (tags_len, tags_list) = tg::list_to_sql(tags);
+        let tags_list = crate::utils::list_to_values(tags);
+        // Commented in "/src/sql/db.sql"
         let stmt = format!(
             r#"
-                select file from FileTags
-                where tag in {tags_list}
-                group by file 
-                having count(*) = {tags_len}
+                WITH
+                TargetTags AS ( VALUES {tags_list} ),
+                TagsLen AS (
+                    SELECT COUNT(*) AS len FROM TargetTags
+                ),
+                FoundFiles AS MATERIALIZED (
+                    SELECT ft.fileId as id
+                    FROM FileTags ft
+                    JOIN Tags t ON t.id = ft.tagId
+                    WHERE t.tag IN TargetTags
+                    GROUP BY ft.fileId
+                    HAVING COUNT(t.tag) = (SELECT len FROM TagsLen)
+                ),
+                FoundTags AS MATERIALIZED (
+                    SELECT DISTINCT t.tag
+                    FROM FileTags ft
+                    JOIN Tags t ON t.id = ft.tagId
+                    WHERE ft.fileId IN FoundFiles
+                    AND t.tag NOT IN TargetTags
+                )
+                SELECT t.tag, NULL AS file
+                FROM FoundTags t
+                UNION ALL
+                SELECT NULL AS tag, f.file
+                FROM FoundFiles ff
+                JOIN Files f ON f.id = ff.id
             "#
         );
         let mut prep_stmt = db.prepare_cached(&stmt).unwrap();
-        let files = prep_stmt
+        let results = prep_stmt
             .query_map([], |r| {
-                let name = std::ffi::OsString::from(format!("_{}", r.get_ref(0)?.as_str()?.split('/').last().unwrap()));
-                let kind = fusemt::FileType::Symlink;
-                Ok((name, kind))
+                let tag = r.get_ref(0)?.as_str_or_null()?;
+                if let Some(tag) = tag {
+                    let prefix = self.config.tag_prefix();
+                    let tag = format!("{prefix}{tag}");
+                    let kind = fusemt::FileType::Directory;
+                    Ok((tag, kind))
+                } else {
+                    let prefix = self.config.file_prefix();
+                    let file = { 
+                        let p = r.get_ref(1)?.as_str()?;
+                        let start = p.rfind('/').unwrap_or_else(|| panic!("expected file name in {p}"));
+                        &p[start+1..]
+                    };
+                    let kind = fusemt::FileType::Symlink;
+                    Ok((format!("{prefix}{file}"), kind))
+                }
             })
             .unwrap()
-            .flatten();
-
-        let stmt = if path.file_name().is_none() {
-            "select distinct tag from FileTags;"
-        } else {
-            &format!(
-                r#"
-                select distinct tag from FileTags where file in (
-                    {stmt}
-                ) and tag not in {tags_list};
-            "#
-            )
-        };
-        let mut prep_stmt = db.prepare_cached(stmt).unwrap();
-        let tags = prep_stmt
-            .query_map([], |r| {
-                let name = std::ffi::OsString::from(format!(":{}", r.get_ref(0)?.as_str()?));
-                let kind = fusemt::FileType::Directory;
-                Ok((name, kind))
-            })
-            .unwrap()
-            .flatten();
+            .flatten()
+            .map(|(s, t)| (OsString::from(s), t));
 
         let entries = [
             (std::ffi::OsString::from("."), fusemt::FileType::Directory),
             (std::ffi::OsString::from(".."), fusemt::FileType::Directory),
         ]
         .into_iter()
-        .chain(tags)
-        .chain(files)
+        .chain(results)
         .map(|(name, kind)| fusemt::DirectoryEntry { name, kind })
         .collect();
-
+        
         Ok(entries)
     }
 

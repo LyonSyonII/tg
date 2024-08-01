@@ -1,38 +1,42 @@
-create table if not exists FileTags (
-  file text,
-  tag text,
-  
-  primary key (file, tag)
-) WITHOUT ROWID;
-  
-insert into FileTags values
-  ("/show must go on.mp3", "rock"),
-  ("/show must go on.mp3", "mp3"),
-  ("/show must go on.mp3", "music"),
-  ("/show must go on.mp3", "queen"),
-  
-  ("/boig per tu.mp4", "rock"),
-  ("/boig per tu.mp4", "music"),
-  
-  ("/bethoven.mp3", "music"),
-  ("/bethoven.mp3", "mp3"),
-  ("/bethoven.mp3", "classic"),
-  
-  ("/mozart.flac", "music"),
-  ("/mozart.flac", "classic"),
-  ("/mozart.flac", "flac");
+-- # All the currently used tags
+SELECT DISTINCT t.tag
+FROM FileTags ft
+JOIN Tags t ON t.id = ft.tagId;
 
--- /queen => ["rock", "music", "mp3"]
--- /mp3 => ["rock", "music", "queen"]
--- /queen/mp3 => ["music", "rock"]
--- /classic => ["music", "mp3", "flac"]
--- /classic/flac => ["music"]
 
--- donada una o mes tags, troba les tags dels arxius amb aquestes tags
+-- # Get both files and tags that match the specified list
+-- # Results are as follows:
+-- # { 
+-- #   tag: text | null,
+-- #   file: text | null
+-- # }[]
+WITH
+-- Tag list
+TargetTags AS ( VALUES ('tag1') ),
 
-select tag from FileTags where file in (
-  select file from FileTags
-  where tag in ("queen")
-  group by file 
-  having count(*) = 1
-) and tag not in ("queen");
+-- Identify files that have exactly the target tags
+FoundFiles AS MATERIALIZED (
+    SELECT ft.fileId as id, ft.duplicateId as duplicateId
+    FROM FileTags ft
+    JOIN Tags t ON t.id = ft.tagId
+    WHERE t.tag IN TargetTags
+    GROUP BY ft.fileId
+    HAVING COUNT(t.tag) = (SELECT COUNT(*) FROM TargetTags)
+),
+
+-- Main query to find tags for these files, excluding specific tags
+FoundTags AS MATERIALIZED (
+    SELECT DISTINCT t.tag
+    FROM FileTags ft
+    JOIN Tags t ON t.id = ft.tagId
+    WHERE ft.fileId IN (select id from FoundFiles)
+    AND t.tag NOT IN TargetTags
+)
+
+-- Select results combining FoundTags and FoundFiles
+SELECT t.tag, NULL AS file
+FROM FoundTags t
+UNION ALL           -- TODO: Optimize this aberration
+SELECT NULL AS tag, iif( exists(select duplicateId from FoundFiles where file = f.file AND duplicateId > 0), ff.duplicateId || "_", "") || f.file
+FROM FoundFiles ff
+JOIN Files f ON f.id = ff.id;

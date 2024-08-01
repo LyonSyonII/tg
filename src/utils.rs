@@ -15,6 +15,51 @@ impl log::Log for ConsoleLogger {
 #[allow(private_interfaces)]
 pub static LOGGER: ConsoleLogger = ConsoleLogger;
 
+pub fn list_to_values<S: std::fmt::Debug>(list: impl IntoIterator<Item = S>) -> String {
+    let mut list = list.into_iter();
+
+    let mut acc = String::from("(");
+    if let Some(f) = list.next() {
+        acc = format!("{acc}{f:?})");
+    }
+    for s in list {
+        acc = format!("{acc},({s:?})");
+    }
+
+    acc
+}
+
+pub fn list_to_values_and_key(key: impl std::fmt::Debug, list: impl AsRef<[String]>) -> String {
+    let list = list.as_ref();
+
+    let mut acc = format!("({key:?},\"");
+    let separator = format!("\"),({key:?},\"");
+    if let Some(f) = list.first() {
+        acc += f.as_ref();
+    }
+    for s in list.get(1..).unwrap_or_default() {
+        acc = acc + &separator + s.as_ref();
+    }
+    acc += "\")";
+
+    acc
+}
+
+pub fn list_to_sql<S: std::fmt::Debug>(list: impl IntoIterator<Item = S>) -> String {
+    let mut list = list.into_iter();
+
+    let mut acc = String::from("(");
+    if let Some(f) = list.next() {
+        acc = format!("{acc}{f:?}");
+    }
+    for s in list {
+        acc = format!("{acc},{s:?}");
+    }
+    acc += ")";
+
+    acc
+}
+
 /// Unwraps the `Result` or panics with the provided message.
 ///
 /// # Examples

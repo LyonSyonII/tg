@@ -8,7 +8,7 @@ pub enum Cli {
     /// Adds TAGS to FILE, will create the tags that don't exist.
     ///
     /// Example: 'tg add Cargo.toml toml rust dev config'
-    #[bpaf(command)]
+    // #[bpaf(command)]
     Add {
         #[bpaf(positional("FILE"))]
         file: PathBuf,

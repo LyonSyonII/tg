@@ -1,6 +1,6 @@
+use crate::or_panic;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use tg::or_panic;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct Config {
