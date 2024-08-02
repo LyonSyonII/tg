@@ -65,7 +65,7 @@ pub fn list_to_sql<S: std::fmt::Debug>(list: impl IntoIterator<Item = S>) -> Str
 /// # Examples
 /// ```
 /// use tg::ok_or_panic;
-/// let n = ok_or_panic!(std::thread::spawn(|| 5).join(), "Error spawning thread");
+/// let threads = ok_or_panic!(std::thread::available_parallelism(), "Error getting thread size");
 /// ```
 #[macro_export]
 macro_rules! ok_or_panic {
