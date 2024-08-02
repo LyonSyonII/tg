@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
             ?2
             )",
         )?;
-        
+
         let mut stdout = std::io::stdout().lock();
         let mut rng = rand::rngs::StdRng::seed_from_u64(57);
         for i in 0..5_000_000 {

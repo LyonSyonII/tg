@@ -16,6 +16,7 @@ confy = "0.6.1"                                                                 
 serde = { version = "1.0", features = ["derive"] }                                   # Serialize/Deserialize structs
 bpaf = { version = "0.9.12", features = ["bright-color", "autocomplete", "derive"] } # CLI argument parsing, alternative to Clap
 bpaf_derive = "0.5.10"                                                               # bpaf derive macros
+simple_logger = { version = "5.0.0", default-features = false, features = ["colors"] }
 
 [dev-dependencies]
 fake = "2.9"        # Generate random words
@@ -23,9 +24,14 @@ rand = "0.8.5"      # RNG provider
 
 [profile.dev]
 debug = 0
-codegen-backend = "cranelift"
+# codegen-backend = "cranelift"
+panic = "unwind"
+
+[profile.dev.build-override]
+debug = false
+
 
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
