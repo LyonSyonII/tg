@@ -29,7 +29,7 @@ fn main() -> Result<()> {
         .init()?;
 
     match cli {
-        Cli::Add { file, tags } => add(file, tags, &mut db)?,
+        Cli::Add { file, tags, name } => add(file, tags, &mut db)?,
         Cli::Mount { mountpoint } => mount(mountpoint, db_path, config)?,
         Cli::Set { set: s } => set(s, config)?,
     }
@@ -42,14 +42,22 @@ fn add(
     tags: impl AsRef<[String]>,
     db: &mut rusqlite::Connection,
 ) -> Result<()> {
-    let path = file.as_ref().canonicalize()?;
+    let file = file.as_ref();
+
+    if let Some(name) = file.file_name() {
+        let name = name.to_string_lossy();
+        if name.starts_with(sql::DUP_SEP) {
+            bail!("invalid name {name:?}, files cannot start with '{}'", sql::DUP_SEP);
+        }
+        if let Some(sql::DUP_SEP) = name.chars().find(|n| !n.is_ascii_digit()) {
+            bail!("invalid name {name:?}, files cannot start with a number and '{}'", sql::DUP_SEP);
+        }
+    }
+    
+    let path = file.canonicalize().with_context(|| format!("the file {file:?} could not be found"))?;
     let tags = tags.as_ref();
 
     debug!("Adding {path:?} : {tags:?}");
-
-    if !path.try_exists()? {
-        bail!("The file {path:?} does not exist");
-    }
 
     let tx = db.transaction()?;
     {
@@ -68,6 +76,8 @@ fn add(
         }
     }
     tx.commit()?;
+
+    eprintln!("{tags:?} added to {path:?}");
 
     Ok(())
 }

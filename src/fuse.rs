@@ -85,14 +85,14 @@ impl Fuse {
             OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_READ_WRITE,
         )
     }
-
+    
     fn name_exists<'a>(&self, path: &'a std::path::Path) -> rusqlite::Result<Name<'a>> {
         fn is_valid<'a>(name: &'a OsStr, config: &Config) -> Name<'a> {
             let bytes = name.as_bytes();
             if bytes.starts_with(config.file_prefix().as_bytes()) {
-                Name::File(OsStr::from_bytes(&bytes[1..]))
+                Name::File(OsStr::from_bytes(&bytes[config.file_prefix().len()..]))
             } else if bytes.starts_with(config.tag_prefix().as_bytes()) {
-                Name::Tag(OsStr::from_bytes(&bytes[1..]))
+                Name::Tag(OsStr::from_bytes(&bytes[config.tag_prefix().len()..]))
             } else {
                 Name::None
             }
@@ -312,6 +312,13 @@ impl fusemt::FilesystemMT for Fuse {
 
     fn readlink(&self, _req: fuse_mt::RequestInfo, path: &std::path::Path) -> fuse_mt::ResultData {
         debug!("[readlink] path = {path:?}");
+        
+        let name = &path.as_os_str().as_bytes()[self.config.file_prefix().len()..];
+        let dup_id = name.iter().position(|&c| c == b'_');
+        if let Some(dup_id) = dup_id {
+            
+        }
+
         Err(libc::ENOSYS)
     }
 

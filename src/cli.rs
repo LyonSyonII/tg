@@ -10,6 +10,9 @@ pub enum Cli {
     /// Example: 'tg add Cargo.toml toml rust dev config'
     // #[bpaf(command)]
     Add {
+        /// Optional name that will be displayed instead of the real one
+        name: String,
+        
         #[bpaf(positional("FILE"))]
         file: PathBuf,
         #[bpaf(positional("TAGS"))]
